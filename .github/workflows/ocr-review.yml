@@ -1,0 +1,149 @@
+name: OpenCodeReview PR Review
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/ocr')) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/open-code-review'))
+    steps:
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name != 'pull_request_target'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_ref', pullRequest.head.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || steps.pr-context.outputs.head_sha }}
+
+      - name: Fetch PR head ref
+        run: git fetch origin pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install OpenCodeReview
+        run: |
+          npm install -g @alibaba-group/open-code-review
+          echo "OpenCodeReview installed:"
+          ocr version || true
+
+      - name: Configure OCR
+        run: |
+          ocr config set provider dashscope
+          ocr config set model qwen3.7-max
+          ocr config set providers.dashscope.api_key "${{ secrets.DASHSCOPE_API_KEY }}"
+
+      - name: Run OpenCodeReview
+        id: review
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            BASE_REF="${{ github.event.pull_request.base.ref }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE_REF="${{ steps.pr-context.outputs.base_ref }}"
+            HEAD_SHA="${{ steps.pr-context.outputs.head_sha }}"
+          fi
+
+          echo "Reviewing PR: ${HEAD_SHA} against origin/${BASE_REF}"
+
+          ocr review \
+            --from "origin/${BASE_REF}" \
+            --to "${HEAD_SHA}" \
+            --format json \
+            > /tmp/ocr-result.json 2>/tmp/ocr-stderr.log || true
+
+          echo "OCR review completed."
+          cat /tmp/ocr-stderr.log >&2 || true
+
+      - name: Post review comments to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const prNumber = context.issue?.number || context.payload.pull_request?.number;
+
+            let result;
+            try {
+              const raw = fs.readFileSync('/tmp/ocr-result.json', 'utf8');
+              result = JSON.parse(raw);
+            } catch (e) {
+              console.log('No valid OCR result found:', e.message);
+              return;
+            }
+
+            const comments = result.comments || [];
+            if (comments.length === 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: '## ✅ OpenCodeReview\n\nNo issues found. Code looks good!'
+              });
+              return;
+            }
+
+            const body = comments.map(c => {
+              const file = c.path || 'unknown';
+              const line = c.start_line ? `L${c.start_line}${c.end_line ? '-L' + c.end_line : ''}` : '';
+              const content = c.content || 'No description';
+              const suggestion = c.suggestion_code || '';
+              const existing = c.existing_code || '';
+
+              let entry = `### 📝 \`${file}\` ${line}\n\n${content}`;
+              if (existing) {
+                entry += `\n\n<details><summary>Existing code</summary>\n\n\`\`\`\n${existing}\n\`\`\`\n</details>`;
+              }
+              if (suggestion) {
+                entry += `\n\n**Suggested fix:**\n\`\`\`\n${suggestion}\n\`\`\``;
+              }
+              return entry;
+            }).join('\n\n---\n\n');
+
+            const summary = result.summary || {};
+            const header = `## 🔍 OpenCodeReview Results\n\n` +
+              `**Model:** qwen3.7-max | ` +
+              `**Files reviewed:** ${summary.files_reviewed || 'N/A'} | ` +
+              `**Issues found:** ${summary.comments || comments.length} | ` +
+              `**Tokens:** ${summary.total_tokens || 'N/A'} | ` +
+              `**Time:** ${summary.elapsed || 'N/A'}\n\n---\n\n`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: header + body
+            });
+
+            console.log(`Posted review with ${comments.length} findings.`);
