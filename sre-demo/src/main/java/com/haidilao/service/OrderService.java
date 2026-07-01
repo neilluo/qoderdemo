@@ -1,5 +1,6 @@
 package com.haidilao.service;
 
+import com.haidilao.exception.OrderNotFoundException;
 import com.haidilao.model.Order;
 import com.haidilao.repository.OrderRepository;
 import org.springframework.stereotype.Service;
@@ -19,13 +20,11 @@ public class OrderService {
 
     /**
      * 根据订单ID查询订单详情
-     * BUG: 当订单不存在时，直接调用 .get() 不做 null 检查，导致 NullPointerException
      */
     public OrderDetailDTO getOrderDetail(Long orderId) {
-        Order order = orderRepository.findById(orderId).orElse(null);
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
 
-        // BUG: 这里没有对 order 做 null 检查
-        // 当 orderId 不存在时，order 为 null，下面的调用会抛出 NullPointerException
         OrderDetailDTO dto = new OrderDetailDTO();
         dto.setOrderNo(order.getOrderNo());
         dto.setCustomerName(order.getCustomerName());
@@ -46,9 +45,9 @@ public class OrderService {
      * 根据订单号查询
      */
     public OrderDetailDTO getOrderByOrderNo(String orderNo) {
-        Order order = orderRepository.findByOrderNo(orderNo).orElse(null);
+        Order order = orderRepository.findByOrderNo(orderNo)
+                .orElseThrow(() -> new OrderNotFoundException(orderNo));
 
-        // 同样的 BUG: 没有 null 检查
         OrderDetailDTO dto = new OrderDetailDTO();
         dto.setOrderNo(order.getOrderNo());
         dto.setCustomerName(order.getCustomerName());
