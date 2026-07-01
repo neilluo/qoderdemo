@@ -1,0 +1,21 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Build
+target/
+*.class
+*.jar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - NEVER commit
+.env
+.env.local
+*.pat
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
